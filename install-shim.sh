@@ -98,14 +98,16 @@ for d in "${TARGET_DIRS[@]}"; do
   echo "[*] Shim installed in $d"
 done
 
-# 3. Set powershell.exe to native. Appending the key again is enough: Wine
-#    merges duplicate keys when it loads the file.
+# 3. Set powershell.exe to native, inside the existing DllOverrides key if any.
+#    Lutris rewrites user.reg with its own parser, which rejects a key header
+#    without the timestamp Wine puts after it, and keeps a single copy of a
+#    key that appears twice.
 remove_override
-cat >> "$USER_REG" <<'EOF'
-
-[Software\\Wine\\DllOverrides]
-"powershell.exe"="native"
-EOF
+if grep -qi '^\[Software\\\\Wine\\\\DllOverrides\]' "$USER_REG"; then
+  sed -i '/^\[Software\\\\Wine\\\\DllOverrides\]/Ia "powershell.exe"="native"' "$USER_REG"
+else
+  printf '\n[Software\\\\Wine\\\\DllOverrides] %s\n"powershell.exe"="native"\n' "$(date +%s)" >> "$USER_REG"
+fi
 echo "[*] powershell.exe=native override added to $USER_REG"
 
 # Lutris passes its DLL overrides through WINEDLLOVERRIDES, which beats the

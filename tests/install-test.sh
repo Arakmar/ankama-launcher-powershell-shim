@@ -2,7 +2,8 @@
 # End-to-end test of install-shim.sh in a throwaway Wine prefix, laid out like
 # the release archive (script + source + prebuilt shim). Checks that:
 #   - after install, the shim answers on every powershell.exe path,
-#   - the override survives Wine rewriting user.reg, and reinstalling,
+#   - user.reg stays readable by Lutris (no duplicate key, no header without
+#     timestamp), and the override survives Wine rewriting it and a reinstall,
 #   - it warns about a Lutris game on this prefix overriding powershell.exe,
 #   - the script refuses to run while a wineserver uses the prefix,
 #   - --uninstall gives Wine's own powershell back.
@@ -49,16 +50,27 @@ count() { grep -ci "$1" "$USER_REG" || true; }
 echo "== Before install"
 expect_shim no
 
-echo "== Install"
+# check_user_reg: user.reg must stay readable by Lutris' parser: one
+# DllOverrides key holding one powershell.exe value, and every key header
+# followed by its timestamp.
+check_user_reg() {
+  [ "$(count '^\[Software\\\\Wine\\\\DllOverrides\]')" = 1 ] || fail "DllOverrides key missing or duplicated"
+  [ "$(count '^"powershell.exe"="native"')" = 1 ] || fail "powershell.exe override missing or duplicated"
+  if grep '^\[' "$USER_REG" | grep -v '\] [0-9]'; then fail "key header without timestamp"; fi
+  echo "ok: user.reg well-formed"
+}
+
+echo "== Install into a prefix without a DllOverrides key"
+sed -i '/^\[Software\\\\Wine\\\\DllOverrides\]/I,/^$/d' "$USER_REG"
 "$INSTALL" "$WINEPREFIX"
+check_user_reg
 expect_shim yes
 
-echo "== Override survives Wine rewriting user.reg, then a reinstall"
+echo "== Reinstall into the existing key, after Wine rewrote user.reg"
 wine reg add 'HKCU\Software\install-shim-test' /f >/dev/null 2>&1
 wineserver -w
-[ "$(count '^\[Software\\\\Wine\\\\DllOverrides\]')" = 1 ] || fail "DllOverrides key not merged"
 "$INSTALL" "$WINEPREFIX" >/dev/null
-[ "$(count '^"powershell.exe"=')" = 1 ] || fail "powershell.exe override duplicated"
+check_user_reg
 expect_shim yes
 
 echo "== Lutris: warns only for a game on this prefix with a non-native override"
