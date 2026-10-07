@@ -35,16 +35,15 @@ TARGET_DIRS=(system32 syswow64 system32/WindowsPowerShell/v1.0 syswow64/WindowsP
 
 is_wine_builtin() { grep -qaF -e 'Wine builtin DLL' -e 'Wine placeholder DLL' "$1"; }
 
-# True if a wineserver runs for this prefix. It works in a directory named
-# server-<device>-<prefix inode> (hex), under /tmp/.wine-<uid> for upstream Wine
-# and Proton but under a random /tmp/wine-XXXXXX for Debian/Ubuntu, and moves to
-# the prefix itself while it loads or saves the registry.
+# True if a wineserver runs for this prefix. A wineserver keeps the prefix
+# directory open for its whole life (its working directory, on the other hand,
+# switches between the prefix and its server directory).
 prefix_in_use() {
-  local dev ino dir pid
-  read -r dev ino < <(stat -L -c '%d %i' "$WINEPREFIX")
-  printf -v dir 'server-%x-%x' "$dev" "$ino"
+  local pid fd
   for pid in $(pgrep -u "$(id -u)" wineserver); do
-    [[ "$(readlink "/proc/$pid/cwd")" == */"$dir" || "/proc/$pid/cwd" -ef "$WINEPREFIX" ]] && return 0
+    for fd in /proc/"$pid"/fd/*; do
+      [ "$fd" -ef "$WINEPREFIX" ] && return 0
+    done
   done
   return 1
 }
