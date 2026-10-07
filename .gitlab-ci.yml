@@ -6,7 +6,7 @@
 # Stages:
 #   build   -> mingw cross-compile, x64 + x86, stripped, sha256
 #   test    -> headless Wine: shim smoke test + install-shim.sh end to end
-#   release -> on tag: upload to the Package Registry + create a Release
+#   release -> on v* tag: upload to the Package Registry + create a Release
 # ---------------------------------------------------------------------------
 
 stages:
@@ -81,14 +81,14 @@ test:wine:
     - tests/install-test.sh dist/x64/powershell.exe
 
 # ------------------------------------------------------------- release ----
-# On tag (e.g. v1.0.0): push the binaries to the generic Package Registry,
+# On a v* tag (e.g. v1.0.0): push the binaries to the generic Package Registry,
 # then create a Release linking to them.
 upload:registry:
   stage: release
   image: curlimages/curl:latest
   needs: ["build:x64", "build:x86", "test:wine"]
   rules:
-    - if: $CI_COMMIT_TAG
+    - if: $CI_COMMIT_TAG =~ /^v/
   script:
     - |
       for arch in x64 x86; do
@@ -117,7 +117,7 @@ release:gitlab:
   image: registry.gitlab.com/gitlab-org/release-cli:latest
   needs: ["upload:registry"]
   rules:
-    - if: $CI_COMMIT_TAG
+    - if: $CI_COMMIT_TAG =~ /^v/
   script:
     - echo "Creating release $CI_COMMIT_TAG"
   release:
