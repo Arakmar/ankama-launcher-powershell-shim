@@ -1,0 +1,149 @@
+# ---------------------------------------------------------------------------
+# GitHub Actions counterpart of .gitlab-ci.yml.
+#
+# Jobs:
+#   build   -> mingw cross-compile, x64 + x86, stripped, sha256
+#   test    -> headless Wine: shim smoke test + install-shim.sh end to end
+#   release -> on v* tag: GitHub Release with the binaries, an install
+#              archive and SHA256SUMS
+# ---------------------------------------------------------------------------
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PKG_NAME: ankama-launcher-powershell-shim
+  SHIM_SRC: powershell-shim-v2.c
+
+jobs:
+  build:
+    name: build (${{ matrix.arch }})
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        include:
+          - arch: x64
+            triplet: x86_64-w64-mingw32
+            pkg: gcc-mingw-w64-x86-64
+          - arch: x86
+            triplet: i686-w64-mingw32
+            pkg: gcc-mingw-w64-i686
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install mingw
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ${{ matrix.pkg }}
+
+      - name: Build
+        run: |
+          mkdir -p dist
+          ${{ matrix.triplet }}-gcc -O2 -s -Wall -o dist/powershell.exe "$SHIM_SRC"
+          cd dist && sha256sum powershell.exe | tee powershell.exe.sha256
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: powershell-${{ matrix.arch }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+
+  test:
+    needs: build
+    runs-on: ubuntu-24.04
+    env:
+      WINEDEBUG: -all
+      # No mono/gecko install on wineboot (useless and slow when headless)
+      WINEDLLOVERRIDES: "mscoree,mshtml="
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: powershell-x64
+          path: dist/x64
+
+      - name: Install Wine
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends wine wine64
+          wineboot --init && wineserver -w
+
+      # The shim must print the Caption/FreeSpace/Size table when the command
+      # line contains Win32_LogicalDisk, and nothing otherwise (exit 0).
+      - name: Win32_LogicalDisk -> Caption/FreeSpace/Size table
+        run: |
+          out=$(wine dist/x64/powershell.exe -NoProfile -Command "Get-CimInstance -ClassName Win32_LogicalDisk | Select-Object Caption, FreeSpace, Size")
+          echo "$out"
+          echo "$out" | grep -q "Caption"
+          echo "$out" | grep -Eq "^C:[[:space:]]+[0-9]+"
+
+      - name: Any other command -> silent, exit 0
+        run: |
+          out=$(wine dist/x64/powershell.exe -NoProfile -Command "echo hello")
+          test -z "$out"
+
+      - name: install-shim.sh end to end (install, guard, uninstall)
+        run: tests/install-test.sh dist/x64/powershell.exe
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, test]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+
+      - name: Prepare assets
+        run: |
+          mkdir release
+          for arch in x64 x86; do
+            cp "artifacts/powershell-$arch/powershell.exe" "release/powershell-$arch.exe"
+          done
+          # Ready-to-use archive for install-shim.sh, which takes the
+          # powershell.exe next to it (or rebuilds the source when mingw is installed)
+          bundle="$PKG_NAME-$GITHUB_REF_NAME"
+          mkdir "$bundle"
+          cp install-shim.sh "$SHIM_SRC" LICENSE artifacts/powershell-x64/powershell.exe "$bundle/"
+          chmod +x "$bundle/install-shim.sh"
+          tar -czf "release/$bundle.tar.gz" "$bundle"
+          cd release && sha256sum -- *.exe *.tar.gz | tee SHA256SUMS
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" release/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "powershell.exe shim $GITHUB_REF_NAME" \
+            --notes-file - <<EOF
+          powershell.exe shim that fixes the Ankama Launcher "Invalid path" error
+          (code 9001) under Wine/Proton.
+
+          Install, with the launcher closed (the script finds drive_c under the given path):
+
+              tar xzf $PKG_NAME-$GITHUB_REF_NAME.tar.gz
+              cd $PKG_NAME-$GITHUB_REF_NAME
+              ./install-shim.sh ~/Games/dofus
+
+          Uninstall: ./install-shim.sh --uninstall ~/Games/dofus
+
+          powershell-x64.exe and powershell-x86.exe are the bare binaries, for a
+          manual install. To check the downloads:
+
+              sha256sum -c --ignore-missing SHA256SUMS
+          EOF

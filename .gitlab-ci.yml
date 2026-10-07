@@ -1,0 +1,152 @@
+# ---------------------------------------------------------------------------
+# Builds the powershell.exe shim for the Ankama Launcher under Wine/Proton.
+# Compiled source: $SHIM_SRC (powershell-shim-v2.c, the Win32 API version with
+# no wmic dependency). GitHub mirror: .github/workflows/build.yml
+#
+# Stages:
+#   build   -> mingw cross-compile, x64 + x86, stripped, sha256
+#   test    -> headless Wine: shim smoke test + install-shim.sh end to end
+#   release -> on tag: upload to the Package Registry + create a Release
+# ---------------------------------------------------------------------------
+
+stages:
+  - build
+  - test
+  - release
+
+variables:
+  PKG_NAME: "ankama-launcher-powershell-shim"
+  SHIM_SRC: "powershell-shim-v2.c"
+
+# --------------------------------------------------------------- build ----
+build:x64:
+  stage: build
+  image: debian:bookworm-slim
+  before_script:
+    - apt-get update -qq
+    - apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64 >/dev/null
+  script:
+    - mkdir -p dist/x64
+    - x86_64-w64-mingw32-gcc -O2 -s -Wall -o dist/x64/powershell.exe "$SHIM_SRC"
+    # cd so that the .sha256 file names "powershell.exe", not "dist/x64/..."
+    - cd dist/x64 && sha256sum powershell.exe | tee powershell.exe.sha256
+  artifacts:
+    paths: [dist/x64/]
+    expire_in: 1 month
+
+build:x86:
+  stage: build
+  image: debian:bookworm-slim
+  before_script:
+    - apt-get update -qq
+    - apt-get install -y --no-install-recommends gcc-mingw-w64-i686 >/dev/null
+  script:
+    - mkdir -p dist/x86
+    - i686-w64-mingw32-gcc -O2 -s -Wall -o dist/x86/powershell.exe "$SHIM_SRC"
+    - cd dist/x86 && sha256sum powershell.exe | tee powershell.exe.sha256
+  artifacts:
+    paths: [dist/x86/]
+    expire_in: 1 month
+
+# ---------------------------------------------------------------- test ----
+# Smoke test: the shim must print the Caption/FreeSpace/Size table when the
+# command line contains Win32_LogicalDisk, and nothing otherwise (exit 0).
+# Then install-shim.sh end to end, in a throwaway prefix.
+test:wine:
+  stage: test
+  image: debian:bookworm-slim
+  needs: ["build:x64"]
+  variables:
+    WINEDEBUG: "-all"
+    # No mono/gecko install on wineboot (useless and slow when headless)
+    WINEDLLOVERRIDES: "mscoree,mshtml="
+    # Default prefix (~/.wine): Wine refuses to create one in a directory the
+    # current user does not own, which $CI_PROJECT_DIR can be on some executors.
+  before_script:
+    - apt-get update -qq
+    # procps: pgrep, used by install-shim.sh
+    - apt-get install -y --no-install-recommends wine wine64 procps >/dev/null
+    - wineboot --init && wineserver -w
+  script:
+    # Case 1: disk query -> header and at least C:
+    - out=$(wine dist/x64/powershell.exe -NoProfile -Command
+        "Get-CimInstance -ClassName Win32_LogicalDisk | Select-Object Caption, FreeSpace, Size")
+    - echo "$out"
+    - echo "$out" | grep -q "Caption"
+    - echo "$out" | grep -Eq "^C:[[:space:]]+[0-9]+"
+    # Case 2: any other call -> silent, exit 0
+    - out2=$(wine dist/x64/powershell.exe -NoProfile -Command "echo hello")
+    - test -z "$out2"
+    # install / guard / uninstall, with the shim built above
+    - tests/install-test.sh dist/x64/powershell.exe
+
+# ------------------------------------------------------------- release ----
+# On tag (e.g. v1.0.0): push the binaries to the generic Package Registry,
+# then create a Release linking to them.
+upload:registry:
+  stage: release
+  image: curlimages/curl:latest
+  needs: ["build:x64", "build:x86", "test:wine"]
+  rules:
+    - if: $CI_COMMIT_TAG
+  script:
+    - |
+      for arch in x64 x86; do
+        curl --fail --header "JOB-TOKEN: $CI_JOB_TOKEN" \
+          --upload-file "dist/$arch/powershell.exe" \
+          "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/$PKG_NAME/$CI_COMMIT_TAG/powershell-$arch.exe"
+        curl --fail --header "JOB-TOKEN: $CI_JOB_TOKEN" \
+          --upload-file "dist/$arch/powershell.exe.sha256" \
+          "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/$PKG_NAME/$CI_COMMIT_TAG/powershell-$arch.exe.sha256"
+      done
+    # Ready-to-use archive for install-shim.sh, which takes the powershell.exe
+    # next to it (or rebuilds the source when mingw is installed). Built in
+    # /tmp: the curl image runs as a non-root user.
+    - |
+      bundle="$PKG_NAME-$CI_COMMIT_TAG"
+      mkdir "/tmp/$bundle"
+      cp install-shim.sh "$SHIM_SRC" LICENSE dist/x64/powershell.exe "/tmp/$bundle/"
+      chmod +x "/tmp/$bundle/install-shim.sh"
+      tar -czf "/tmp/$bundle.tar.gz" -C /tmp "$bundle"
+      curl --fail --header "JOB-TOKEN: $CI_JOB_TOKEN" \
+        --upload-file "/tmp/$bundle.tar.gz" \
+        "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/$PKG_NAME/$CI_COMMIT_TAG/$bundle.tar.gz"
+
+release:gitlab:
+  stage: release
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  needs: ["upload:registry"]
+  rules:
+    - if: $CI_COMMIT_TAG
+  script:
+    - echo "Creating release $CI_COMMIT_TAG"
+  release:
+    tag_name: "$CI_COMMIT_TAG"
+    name: "powershell.exe shim $CI_COMMIT_TAG"
+    # No double quotes or backticks: the description goes through the shell
+    description: |
+      powershell.exe shim that fixes the Ankama Launcher 'Invalid path' error
+      (code 9001) under Wine/Proton.
+
+      Install, with the launcher closed (the script finds drive_c under the given path):
+
+          tar xzf $PKG_NAME-$CI_COMMIT_TAG.tar.gz
+          cd $PKG_NAME-$CI_COMMIT_TAG
+          ./install-shim.sh ~/Games/dofus
+
+      Uninstall: ./install-shim.sh --uninstall ~/Games/dofus
+
+      powershell-x64.exe and powershell-x86.exe are the bare binaries, for a
+      manual install.
+    assets:
+      links:
+        - name: "$PKG_NAME-$CI_COMMIT_TAG.tar.gz (install-shim.sh + x64 shim)"
+          url: "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/$PKG_NAME/$CI_COMMIT_TAG/$PKG_NAME-$CI_COMMIT_TAG.tar.gz"
+        - name: "powershell-x64.exe"
+          url: "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/$PKG_NAME/$CI_COMMIT_TAG/powershell-x64.exe"
+        - name: "powershell-x86.exe"
+          url: "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/$PKG_NAME/$CI_COMMIT_TAG/powershell-x86.exe"
+        - name: "powershell-x64.exe.sha256"
+          url: "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/$PKG_NAME/$CI_COMMIT_TAG/powershell-x64.exe.sha256"
+        - name: "powershell-x86.exe.sha256"
+          url: "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/$PKG_NAME/$CI_COMMIT_TAG/powershell-x86.exe.sha256"

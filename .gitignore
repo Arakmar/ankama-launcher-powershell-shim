@@ -1,0 +1,5 @@
+# Build outputs: dist/ (CI) and powershell.exe (install-shim.sh)
+dist/
+*.exe
+*.sha256
+*.o
