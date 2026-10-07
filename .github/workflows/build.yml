@@ -118,7 +118,7 @@ jobs:
           # powershell.exe next to it (or rebuilds the source when mingw is installed)
           bundle="$PKG_NAME-$GITHUB_REF_NAME"
           mkdir "$bundle"
-          cp install-shim.sh "$SHIM_SRC" LICENSE artifacts/powershell-x64/powershell.exe "$bundle/"
+          cp install-shim.sh "$SHIM_SRC" README.md LICENSE artifacts/powershell-x64/powershell.exe "$bundle/"
           chmod +x "$bundle/install-shim.sh"
           tar -czf "release/$bundle.tar.gz" "$bundle"
           cd release && sha256sum -- *.exe *.tar.gz | tee SHA256SUMS
